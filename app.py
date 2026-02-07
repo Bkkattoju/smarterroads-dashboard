@@ -3,13 +3,14 @@ import time
 from datetime import datetime, timezone, timedelta
 from typing import Optional, List, Dict, Any, Iterable, Tuple
 
-import requests
-import xml.etree.ElementTree as ET
 import pandas as pd
-import streamlit as st
-import plotly.express as px
 import pytz
+import requests
+import streamlit as st
+import xml.etree.ElementTree as ET
+import plotly.express as px
 from streamlit_autorefresh import st_autorefresh
+
 
 EVENTS_URL = "https://data.511-atis-ttrip-prod.iteriscloud.com/smarterRoads/eventFiltered/eventFilteredTMDD/current/eventFiltered_tmdd.xml"
 WEATHER_URL = "https://data.511-atis-ttrip-prod.iteriscloud.com/smarterRoads/weather/weatherTMDD/current/weather_tmdd.xml"
@@ -31,7 +32,7 @@ DEFAULT_WIND_METRIC = "weather-data__avg-wind-speed"
 EASTERN = pytz.timezone("US/Eastern")
 
 st.set_page_config(page_title="SmarterRoads Real-Time Dashboard", layout="wide")
-st_autorefresh(interval=AUTO_REFRESH_MS, key="auto_refresh_v1")
+st_autorefresh(interval=AUTO_REFRESH_MS, key="auto_refresh_v2")
 
 
 def utc_now() -> datetime:
@@ -40,17 +41,6 @@ def utc_now() -> datetime:
 
 def et_now() -> datetime:
     return datetime.now(EASTERN)
-
-
-def file_mtime_utc(path: str) -> Optional[datetime]:
-    if not os.path.exists(path):
-        return None
-    return datetime.fromtimestamp(os.path.getmtime(path), tz=timezone.utc)
-
-
-def newest_timestamp(ts_list: List[Optional[datetime]]) -> Optional[datetime]:
-    vals = [t for t in ts_list if t is not None]
-    return max(vals) if vals else None
 
 
 def to_eastern(dt: Optional[datetime]) -> Optional[datetime]:
@@ -64,6 +54,17 @@ def to_eastern(dt: Optional[datetime]) -> Optional[datetime]:
 def fmt_et(dt: Optional[datetime]) -> str:
     d = to_eastern(dt)
     return d.strftime("%Y-%m-%d %H:%M:%S %Z") if d else "—"
+
+
+def file_mtime_utc(path: str) -> Optional[datetime]:
+    if not os.path.exists(path):
+        return None
+    return datetime.fromtimestamp(os.path.getmtime(path), tz=timezone.utc)
+
+
+def newest_timestamp(ts_list: List[Optional[datetime]]) -> Optional[datetime]:
+    vals = [t for t in ts_list if t is not None]
+    return max(vals) if vals else None
 
 
 def acquire_lock(lock_path: str, max_age_seconds: int = 300) -> bool:
@@ -90,6 +91,27 @@ def release_lock(lock_path: str) -> None:
             os.remove(lock_path)
     except Exception:
         pass
+
+
+def get_token(name: str) -> Optional[str]:
+    try:
+        if name in st.secrets:
+            v = str(st.secrets[name]).strip()
+            return v if v else None
+    except Exception:
+        pass
+    v2 = os.getenv(name)
+    if v2 and v2.strip():
+        return v2.strip()
+    return None
+
+
+def fetch_xml(url: str, token: str) -> bytes:
+    r = requests.get(url, headers=HEADERS, params={"token": token}, timeout=90)
+    if r.status_code == 403:
+        raise RuntimeError(f"HTTP 403 for endpoint: {url}")
+    r.raise_for_status()
+    return r.content
 
 
 def local_name(tag: str) -> str:
@@ -161,39 +183,6 @@ def to_degree(v: Optional[float]) -> Optional[float]:
     if v is None:
         return None
     return v / 1e6 if abs(v) > 180 else v
-
-
-def get_token(name: str) -> Optional[str]:
-    try:
-        if name in st.secrets:
-            val = str(st.secrets[name]).strip()
-            return val if val else None
-    except Exception:
-        pass
-    val2 = os.getenv(name)
-    if val2 and val2.strip():
-        return val2.strip()
-    return None
-
-
-def fetch_xml(url: str, token: str) -> bytes:
-    r = requests.get(url, headers=HEADERS, params={"token": token}, timeout=90)
-    if r.status_code == 403:
-        raise RuntimeError("HTTP 403 (token rejected). Check token for this endpoint.")
-    r.raise_for_status()
-    return r.content
-
-
-def normalize_lane_count(x: Optional[str]) -> Optional[int]:
-    if x is None:
-        return None
-    s = x.strip()
-    if not s:
-        return None
-    try:
-        return int(float(s))
-    except Exception:
-        return None
 
 
 def extract_point_latlon_any(rec: ET.Element) -> Tuple[Optional[float], Optional[float]]:
@@ -276,11 +265,11 @@ def parse_events_xml(xml_bytes: bytes) -> pd.DataFrame:
         route = text_by_local(rec, "route") or text_by_local(rec, "routeLocation")
         location_name = text_by_local(rec, "locationName") or text_by_local(rec, "routeLocation")
         travel_direction = text_by_local(rec, "travelDirection")
-        lanes_affected = text_by_local(rec, "lanesAffected") or text_by_local(rec, "lanes_affected")
-        lane_count = normalize_lane_count(text_by_local(rec, "laneCount") or text_by_local(rec, "lane_count"))
         lat, lon = extract_point_latlon_any(rec)
+
         if not incident_id and not description and lat is None and lon is None:
             continue
+
         rows.append(
             {
                 "incident_id": incident_id,
@@ -298,20 +287,19 @@ def parse_events_xml(xml_bytes: bytes) -> pd.DataFrame:
                 "route": route,
                 "location_name": location_name,
                 "travel_direction": travel_direction,
-                "lanes_affected": lanes_affected,
-                "lane_count": lane_count,
                 "lat": lat,
                 "lon": lon,
             }
         )
+
     df = pd.DataFrame(rows)
     if df.empty:
         return df
+
     for c in ["update_time", "start_time", "clear_time"]:
         if c in df.columns:
             df[c] = pd.to_datetime(df[c], errors="coerce", utc=True).dt.tz_convert("US/Eastern")
-    if "lane_count" in df.columns:
-        df["lane_count"] = pd.to_numeric(df["lane_count"], errors="coerce")
+
     df = df.drop_duplicates(subset=["incident_id", "update_time", "lat", "lon"], keep="last")
     return df
 
@@ -364,16 +352,20 @@ def parse_weather_xml(xml_bytes: bytes) -> Tuple[pd.DataFrame, pd.DataFrame]:
         inventory = station.find("orci:inventory", NS)
         if inventory is None:
             continue
+
         inv_header = find_first_by_local(inventory, "device-inventory-header")
         org_info = find_first_by_local(inventory, "organization-information")
+
         org_id = text_by_local(org_info, "organization-id")
         device_id = text_by_local(inv_header, "device-id")
         device_name = text_by_local(inv_header, "device-name")
         lat = to_float_degree(text_by_local(inv_header, "latitude"))
         lon = to_float_degree(text_by_local(inv_header, "longitude"))
+
         data = station.find("orci:data", NS)
         if data is None:
             continue
+
         for sensor in iter_by_local(data, "ess-sensor"):
             ess_id = text_by_local(sensor, "ess-sensor-id")
             timestamp_elem = find_first_by_local(sensor, "ess-observation-timestamp")
@@ -387,6 +379,7 @@ def parse_weather_xml(xml_bytes: bytes) -> Tuple[pd.DataFrame, pd.DataFrame]:
                     text_by_local(timestamp_elem, "time"),
                     text_by_local(timestamp_elem, "offset"),
                 )
+
             base = {
                 "org_id": org_id,
                 "station_device_id": device_id,
@@ -396,6 +389,7 @@ def parse_weather_xml(xml_bytes: bytes) -> Tuple[pd.DataFrame, pd.DataFrame]:
                 "ess_sensor_id": ess_id,
                 "obs_iso8601": obs_iso,
             }
+
             obs_type = find_first_by_local(sensor, "ess-observation-type")
             if obs_type is not None:
                 for bucket_name in ("weather-data", "surface-data", "subsurface-data"):
@@ -411,6 +405,7 @@ def parse_weather_xml(xml_bytes: bytes) -> Tuple[pd.DataFrame, pd.DataFrame]:
                                     "value": metric.text.strip(),
                                 }
                             )
+
             alert = find_first_by_local(sensor, "sensor-alert")
             if alert is not None:
                 update_time = text_by_local(alert, "update-time")
@@ -419,17 +414,22 @@ def parse_weather_xml(xml_bytes: bytes) -> Tuple[pd.DataFrame, pd.DataFrame]:
                     rows_long.append({**base, "metric_full": "alert__update-time", "value": update_time})
                 if threshold is not None:
                     rows_long.append({**base, "metric_full": "alert__threshold", "value": threshold})
+
     long_df = pd.DataFrame(rows_long)
     index_cols = ["org_id", "station_device_id", "station_device_name", "lat", "lon", "obs_iso8601"]
+
     if long_df.empty:
         wide_df = pd.DataFrame(columns=index_cols)
         return long_df, wide_df
+
     long_df["obs_iso8601"] = pd.to_datetime(long_df["obs_iso8601"], errors="coerce", utc=True).dt.tz_convert("US/Eastern")
+
     wide_df = long_df.pivot_table(index=index_cols, columns="metric_full", values="value", aggfunc="first").reset_index()
     for col in wide_df.columns:
         if col in index_cols:
             continue
         wide_df[col] = pd.to_numeric(wide_df[col], errors="coerce")
+
     return long_df, wide_df
 
 
@@ -437,23 +437,30 @@ def ingest_if_due() -> None:
     last_events = file_mtime_utc(EVENTS_CSV)
     last_weather = newest_timestamp([file_mtime_utc(WEATHER_LONG_CSV), file_mtime_utc(WEATHER_WIDE_CSV)])
     last_any = newest_timestamp([last_events, last_weather])
+
     due = last_any is None or (utc_now() - last_any) >= timedelta(seconds=AUTO_INGEST_SECONDS)
     if not due:
         return
+
     if not acquire_lock(LOCK_FILE):
         return
+
     try:
         tok_events = get_token("ITERIS_TOKEN_EVENTFILTERED") or get_token("ITERIS_TOKEN_EVENTS")
         tok_weather = get_token("ITERIS_TOKEN_WEATHER")
+
         if not tok_events or not tok_weather:
             raise RuntimeError("Missing tokens: set secrets ITERIS_TOKEN_EVENTFILTERED (or ITERIS_TOKEN_EVENTS) and ITERIS_TOKEN_WEATHER")
+
         ev_xml = fetch_xml(EVENTS_URL, tok_events)
         ev_df = parse_events_xml(ev_xml)
         ev_df.to_csv(EVENTS_CSV, index=False)
+
         wx_xml = fetch_xml(WEATHER_URL, tok_weather)
         wlong, wwide = parse_weather_xml(wx_xml)
         wlong.to_csv(WEATHER_LONG_CSV, index=False)
         wwide.to_csv(WEATHER_WIDE_CSV, index=False)
+
     finally:
         release_lock(LOCK_FILE)
 
@@ -469,28 +476,37 @@ def load_csv(path: str) -> pd.DataFrame:
 
 
 def parse_loaded_events(df: pd.DataFrame) -> pd.DataFrame:
-    if df.empty:
-        return df
+    if df is None or df.empty:
+        return pd.DataFrame()
+
     for c in ["update_time", "start_time", "clear_time"]:
-        if c in df.columns:
-            df[c] = pd.to_datetime(df[c], errors="coerce")
-            if getattr(df[c].dt, "tz", None) is None:
-                df[c] = df[c].dt.tz_localize("US/Eastern", nonexistent="shift_forward", ambiguous="NaT")
+        if c not in df.columns:
+            continue
+
+        df[c] = pd.to_datetime(df[c], errors="coerce", utc=True)
+
+        if pd.api.types.is_datetime64tz_dtype(df[c]):
+            df[c] = df[c].dt.tz_convert("US/Eastern")
+        elif pd.api.types.is_datetime64_any_dtype(df[c]):
+            df[c] = df[c].dt.tz_localize("US/Eastern", nonexistent="shift_forward", ambiguous="NaT")
+
     return df
 
 
 def parse_loaded_weather_wide(df: pd.DataFrame) -> pd.DataFrame:
-    if df.empty:
-        return df
+    if df is None or df.empty:
+        return pd.DataFrame()
+
     if "obs_iso8601" in df.columns:
-        df["obs_iso8601"] = pd.to_datetime(df["obs_iso8601"], errors="coerce")
-        if getattr(df["obs_iso8601"].dt, "tz", None) is None:
-            df["obs_iso8601"] = df["obs_iso8601"].dt.tz_localize("US/Eastern", nonexistent="shift_forward", ambiguous="NaT")
+        df["obs_iso8601"] = pd.to_datetime(df["obs_iso8601"], errors="coerce", utc=True)
+        if pd.api.types.is_datetime64tz_dtype(df["obs_iso8601"]):
+            df["obs_iso8601"] = df["obs_iso8601"].dt.tz_convert("US/Eastern")
+
     return df
 
 
 def numeric_metric_columns(wwide: pd.DataFrame) -> List[str]:
-    if wwide.empty:
+    if wwide is None or wwide.empty:
         return []
     reserved = {"org_id", "station_device_id", "station_device_name", "lat", "lon", "obs_iso8601"}
     candidates = [c for c in wwide.columns if c not in reserved]
@@ -524,7 +540,7 @@ def safe_plotly(fig, height: int, key: str, bottom_margin: int = 70) -> None:
 
 
 def latest_weather_snapshot(wwide: pd.DataFrame) -> pd.DataFrame:
-    if wwide.empty or "obs_iso8601" not in wwide.columns:
+    if wwide is None or wwide.empty or "obs_iso8601" not in wwide.columns:
         return pd.DataFrame()
     t = wwide["obs_iso8601"].max()
     if pd.isna(t):
@@ -533,12 +549,16 @@ def latest_weather_snapshot(wwide: pd.DataFrame) -> pd.DataFrame:
 
 
 def weather_timeseries_for_station(wwide: pd.DataFrame, station_id: str, metric: str, hours: int) -> Tuple[pd.DataFrame, str]:
-    if wwide.empty or "obs_iso8601" not in wwide.columns or "station_device_id" not in wwide.columns or metric not in wwide.columns:
+    if wwide is None or wwide.empty:
         return pd.DataFrame(), "raw"
+    if "obs_iso8601" not in wwide.columns or "station_device_id" not in wwide.columns or metric not in wwide.columns:
+        return pd.DataFrame(), "raw"
+
     cutoff = et_now() - timedelta(hours=int(hours))
     sub = wwide[wwide["station_device_id"].astype(str) == str(station_id)].copy()
     sub = sub.dropna(subset=["obs_iso8601"])
     sub = sub[sub["obs_iso8601"] >= cutoff]
+
     scaled, scale_note = scale_series_auto(sub[metric])
     sub["val"] = scaled
     sub = sub.dropna(subset=["val"]).sort_values("obs_iso8601")
@@ -579,16 +599,17 @@ default_wind = choose_default_metric(weather_metrics, DEFAULT_WIND_METRIC)
 with tab_overview:
     st.subheader("Key Metrics")
 
-    total_incidents = int(len(events_df)) if not events_df.empty else 0
+    total_incidents = int(len(events_df)) if events_df is not None and not events_df.empty else 0
     active_incidents = (
         int(events_df["status"].fillna("").str.contains("active", case=False, na=False).sum())
-        if (not events_df.empty and "status" in events_df.columns)
+        if events_df is not None and not events_df.empty and "status" in events_df.columns
         else total_incidents
     )
     new_last_hour = 0
-    if not events_df.empty and "update_time" in events_df.columns:
+    if events_df is not None and not events_df.empty and "update_time" in events_df.columns:
         cutoff = et_now() - timedelta(hours=1)
-        new_last_hour = int((events_df["update_time"] >= cutoff).sum())
+        if pd.api.types.is_datetime64_any_dtype(events_df["update_time"]):
+            new_last_hour = int((events_df["update_time"] >= cutoff).sum())
 
     snap = latest_weather_snapshot(wwide)
     avg_temp = None
@@ -596,7 +617,7 @@ with tab_overview:
     temp_note = "raw"
     vis_note = "raw"
 
-    if not snap.empty and weather_metrics:
+    if snap is not None and not snap.empty and weather_metrics:
         if default_metric in snap.columns:
             v, temp_note = scale_series_auto(snap[default_metric])
             avg_temp = float(v.dropna().mean()) if v.notna().any() else None
@@ -616,33 +637,33 @@ with tab_overview:
 
     with c1:
         st.subheader("Incidents Trend (last 24h)")
-        if not events_df.empty and "update_time" in events_df.columns:
+        if events_df is not None and not events_df.empty and "update_time" in events_df.columns:
             tmp = events_df.dropna(subset=["update_time"]).copy()
             cutoff = et_now() - timedelta(hours=24)
             tmp = tmp[tmp["update_time"] >= cutoff]
             tmp["bucket"] = tmp["update_time"].dt.floor("10min")
             trend = tmp.groupby("bucket").size().reset_index(name="count").sort_values("bucket")
             fig = px.line(trend, x="bucket", y="count", markers=True, title="Incidents per 10 minutes (ET)")
-            safe_plotly(fig, 360, key="ov_incidents_trend", bottom_margin=10)
+            safe_plotly(fig, 360, key="ov_incidents_trend_v2", bottom_margin=10)
         else:
             st.info("No events available yet.")
 
     with c2:
         st.subheader("Weather Trend (station metric)")
-        if not wwide.empty and weather_metrics:
+        if wwide is not None and not wwide.empty and weather_metrics:
             stations = sorted(wwide["station_device_id"].dropna().astype(str).unique().tolist())
-            stn = st.selectbox("Station", stations, index=0, key="ov_station")
+            stn = st.selectbox("Station", stations, index=0, key="ov_station_v2")
             met = st.selectbox(
                 "Metric",
                 weather_metrics,
                 index=weather_metrics.index(default_metric) if default_metric in weather_metrics else 0,
-                key="ov_metric",
+                key="ov_metric_v2",
             )
-            hours = st.slider("Time window (hours)", 1, 48, 12, key="ov_hours")
+            hours = st.slider("Time window (hours)", 1, 48, 12, key="ov_hours_v2")
             ts, scale_note = weather_timeseries_for_station(wwide, stn, met, hours)
             if not ts.empty:
                 fig = px.line(ts, x="obs_iso8601", y="val", markers=True, title=f"{met} @ {stn} ({scale_note})")
-                safe_plotly(fig, 360, key="ov_weather_trend", bottom_margin=10)
+                safe_plotly(fig, 360, key="ov_weather_trend_v2", bottom_margin=10)
             else:
                 st.info("No usable numeric data for this station/metric in the selected window.")
         else:
@@ -653,28 +674,28 @@ with tab_overview:
     b1, b2 = st.columns(2)
     with b1:
         st.subheader("Incidents by Type (Top 12)")
-        if not events_df.empty and "event_type" in events_df.columns:
+        if events_df is not None and not events_df.empty and "event_type" in events_df.columns:
             top = events_df["event_type"].fillna("Unknown").value_counts().head(12).reset_index()
             top.columns = ["event_type", "count"]
             fig = px.bar(top, x="event_type", y="count", title="Top incident types")
-            safe_plotly(fig, 360, key="ov_incidents_type", bottom_margin=120)
+            safe_plotly(fig, 360, key="ov_incidents_type_v2", bottom_margin=120)
         else:
             st.info("No incident types available yet.")
 
     with b2:
         st.subheader("Incidents by District (Top 12)")
-        if not events_df.empty and "district" in events_df.columns:
+        if events_df is not None and not events_df.empty and "district" in events_df.columns:
             top = events_df["district"].fillna("Unknown").value_counts().head(12).reset_index()
             top.columns = ["district", "count"]
             fig = px.bar(top, x="district", y="count", title="Top districts")
-            safe_plotly(fig, 360, key="ov_incidents_district", bottom_margin=120)
+            safe_plotly(fig, 360, key="ov_incidents_district_v2", bottom_margin=120)
         else:
             st.info("No district data available yet.")
 
 with tab_weather:
     st.subheader("Weather Monitoring")
 
-    if wwide.empty or not weather_metrics:
+    if wwide is None or wwide.empty or not weather_metrics:
         st.info("Weather data not available yet.")
     else:
         snap = latest_weather_snapshot(wwide)
@@ -685,20 +706,20 @@ with tab_weather:
             "Weather metric",
             weather_metrics,
             index=weather_metrics.index(default_metric) if default_metric in weather_metrics else 0,
-            key="w_metric",
+            key="w_metric_v2",
         )
-        stn = st.sidebar.selectbox("Station", stations, index=0, key="w_station")
-        hours = st.sidebar.slider("Trend window (hours)", 1, 48, 12, key="w_hours")
+        stn = st.sidebar.selectbox("Station", stations, index=0, key="w_station_v2")
+        hours = st.sidebar.slider("Trend window (hours)", 1, 48, 12, key="w_hours_v2")
 
         top_row = st.columns(4)
-
-        if not snap.empty and met in snap.columns:
+        if snap is not None and not snap.empty and met in snap.columns:
             snap2 = snap.dropna(subset=["lat", "lon"]).copy()
             snap2["val"], scale_note = scale_series_auto(snap2[met])
             station_val = None
             sv = snap2[snap2["station_device_id"].astype(str) == str(stn)]["val"]
             if not sv.dropna().empty:
                 station_val = float(sv.dropna().iloc[0])
+
             top_row[0].metric("Selected metric", met)
             top_row[1].metric(f"Latest @ station ({scale_note})", "—" if station_val is None else f"{station_val:.3f}")
             top_row[2].metric(
@@ -716,13 +737,13 @@ with tab_weather:
             ts, scale_note = weather_timeseries_for_station(wwide, stn, met, hours)
             if not ts.empty:
                 fig = px.line(ts, x="obs_iso8601", y="val", markers=True, title=f"{met} @ {stn} ({scale_note})")
-                safe_plotly(fig, 420, key="weather_station_trend", bottom_margin=10)
+                safe_plotly(fig, 420, key="weather_station_trend_v2", bottom_margin=10)
             else:
                 st.info("No usable numeric data for this station/metric in the selected window.")
 
         with c2:
             st.subheader("Map (Latest Snapshot)")
-            if not snap.empty and met in snap.columns:
+            if snap is not None and not snap.empty and met in snap.columns:
                 map_df = snap.dropna(subset=["lat", "lon"]).copy()
                 map_df["val"], _ = scale_series_auto(map_df[met])
                 map_df = map_df.dropna(subset=["val"])
@@ -737,7 +758,7 @@ with tab_weather:
                         height=420,
                     )
                     fig.update_layout(mapbox_style="open-street-map", margin=dict(l=10, r=10, t=10, b=10))
-                    st.plotly_chart(fig, width="stretch", key="weather_map")
+                    st.plotly_chart(fig, width="stretch", key="weather_map_v2")
                 else:
                     st.info("No mappable values for this metric at the latest snapshot.")
             else:
@@ -748,7 +769,7 @@ with tab_weather:
         d1, d2 = st.columns(2)
         with d1:
             st.subheader("Top Stations (Latest)")
-            if not snap.empty and met in snap.columns:
+            if snap is not None and not snap.empty and met in snap.columns:
                 df = snap.copy()
                 df["val"], _ = scale_series_auto(df[met])
                 df = df.dropna(subset=["val"])
@@ -756,7 +777,7 @@ with tab_weather:
                     df = df.sort_values("val", ascending=False).head(10)
                     df["label"] = df["station_device_name"].fillna(df["station_device_id"])
                     fig = px.bar(df, x="label", y="val", title=f"Top 10 stations by {met}")
-                    safe_plotly(fig, 380, key="weather_top_stations", bottom_margin=130)
+                    safe_plotly(fig, 380, key="weather_top_stations_v2", bottom_margin=130)
                 else:
                     st.info("No values available to rank.")
             else:
@@ -764,13 +785,13 @@ with tab_weather:
 
         with d2:
             st.subheader("Distribution (Latest)")
-            if not snap.empty and met in snap.columns:
+            if snap is not None and not snap.empty and met in snap.columns:
                 df = snap.copy()
                 df["val"], _ = scale_series_auto(df[met])
                 df = df.dropna(subset=["val"])
                 if not df.empty:
                     fig = px.histogram(df, x="val", nbins=30, title=f"Distribution of {met} across stations")
-                    safe_plotly(fig, 380, key="weather_distribution", bottom_margin=70)
+                    safe_plotly(fig, 380, key="weather_distribution_v2", bottom_margin=70)
                 else:
                     st.info("No values to plot.")
             else:
@@ -779,14 +800,23 @@ with tab_weather:
 with tab_events:
     st.subheader("Events / Incidents Monitoring")
 
-    if events_df.empty:
+    if events_df is None or events_df.empty:
         st.info("Events data not available yet.")
     else:
         m1, m2, m3, m4 = st.columns(4)
+
         total = int(len(events_df))
         active = int(events_df["status"].fillna("").str.contains("active", case=False, na=False).sum()) if "status" in events_df.columns else total
-        last_hour = int((events_df["update_time"] >= (et_now() - timedelta(hours=1))).sum()) if "update_time" in events_df.columns else 0
-        most_recent = events_df["update_time"].max() if "update_time" in events_df.columns and not events_df["update_time"].dropna().empty else None
+
+        last_hour = 0
+        if "update_time" in events_df.columns and pd.api.types.is_datetime64_any_dtype(events_df["update_time"]):
+            last_hour = int((events_df["update_time"] >= (et_now() - timedelta(hours=1))).sum())
+
+        most_recent = None
+        if "update_time" in events_df.columns and pd.api.types.is_datetime64_any_dtype(events_df["update_time"]):
+            if not events_df["update_time"].dropna().empty:
+                most_recent = events_df["update_time"].max()
+
         m1.metric("Total incidents", f"{total:,}")
         m2.metric("Active incidents", f"{active:,}")
         m3.metric("New (last 60 min)", f"{last_hour:,}")
@@ -797,16 +827,16 @@ with tab_events:
         c1, c2 = st.columns(2)
         with c1:
             st.subheader("Incidents Over Time (last 24h)")
-            if "update_time" in events_df.columns:
+            if "update_time" in events_df.columns and pd.api.types.is_datetime64_any_dtype(events_df["update_time"]):
                 tmp = events_df.dropna(subset=["update_time"]).copy()
                 cutoff = et_now() - timedelta(hours=24)
                 tmp = tmp[tmp["update_time"] >= cutoff]
                 tmp["bucket"] = tmp["update_time"].dt.floor("10min")
                 trend = tmp.groupby("bucket").size().reset_index(name="count").sort_values("bucket")
                 fig = px.line(trend, x="bucket", y="count", markers=True, title="Incidents per 10 minutes (ET)")
-                safe_plotly(fig, 380, key="events_trend", bottom_margin=10)
+                safe_plotly(fig, 380, key="events_trend_v2", bottom_margin=10)
             else:
-                st.info("No update_time column found in events data.")
+                st.info("No update_time available yet.")
 
         with c2:
             st.subheader("Incidents by Type (Top 15)")
@@ -814,7 +844,7 @@ with tab_events:
                 top = events_df["event_type"].fillna("Unknown").value_counts().head(15).reset_index()
                 top.columns = ["event_type", "count"]
                 fig = px.bar(top, x="event_type", y="count", title="Top incident types")
-                safe_plotly(fig, 380, key="events_type_bar", bottom_margin=130)
+                safe_plotly(fig, 380, key="events_type_bar_v2", bottom_margin=130)
             else:
                 st.info("No event_type column found in events data.")
 
@@ -827,7 +857,7 @@ with tab_events:
                 top = events_df["district"].fillna("Unknown").value_counts().head(12).reset_index()
                 top.columns = ["district", "count"]
                 fig = px.bar(top, x="district", y="count", title="Top districts")
-                safe_plotly(fig, 360, key="events_district_bar", bottom_margin=130)
+                safe_plotly(fig, 360, key="events_district_bar_v2", bottom_margin=130)
             else:
                 st.info("No district column found in events data.")
 
@@ -837,14 +867,14 @@ with tab_events:
                 s = events_df["status"].fillna("Unknown").value_counts().reset_index()
                 s.columns = ["status", "count"]
                 fig = px.bar(s, x="status", y="count", title="Incidents by status")
-                safe_plotly(fig, 360, key="events_status_bar", bottom_margin=130)
+                safe_plotly(fig, 360, key="events_status_bar_v2", bottom_margin=130)
             else:
                 st.info("No status column found in events data.")
 
         st.divider()
 
         st.subheader("Incident Map (last 6 hours)")
-        if {"lat", "lon", "update_time"}.issubset(set(events_df.columns)):
+        if {"lat", "lon", "update_time"}.issubset(set(events_df.columns)) and pd.api.types.is_datetime64_any_dtype(events_df["update_time"]):
             mdf = events_df.dropna(subset=["lat", "lon", "update_time"]).copy()
             cutoff = et_now() - timedelta(hours=6)
             mdf = mdf[mdf["update_time"] >= cutoff]
@@ -859,7 +889,7 @@ with tab_events:
                     height=450,
                 )
                 fig.update_layout(mapbox_style="open-street-map", margin=dict(l=10, r=10, t=10, b=10))
-                st.plotly_chart(fig, width="stretch", key="events_map")
+                st.plotly_chart(fig, width="stretch", key="events_map_v2")
             else:
                 st.info("No mappable incidents in the last 6 hours.")
         else:
