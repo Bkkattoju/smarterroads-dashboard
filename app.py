@@ -1,7 +1,7 @@
 import os
 import time
 from datetime import datetime, timezone, timedelta
-from typing import Optional, List, Dict, Any, Iterable, Tuple
+from typing import Optional, List, Dict, Any, Tuple
 
 import pandas as pd
 import pytz
@@ -9,6 +9,7 @@ import requests
 import streamlit as st
 import xml.etree.ElementTree as ET
 import plotly.express as px
+import plotly.graph_objects as go
 from streamlit_autorefresh import st_autorefresh
 
 
@@ -25,13 +26,44 @@ LOCK_FILE = ".ingest.lock"
 
 HEADERS = {"Accept": "application/xml", "User-Agent": "smarterroads-streamlit-dashboard"}
 
+EASTERN = pytz.timezone("US/Eastern")
+
 DEFAULT_WEATHER_METRIC = "weather-data__air-temperature"
 DEFAULT_VIS_METRIC = "weather-data__visibility-data"
 DEFAULT_WIND_METRIC = "weather-data__avg-wind-speed"
+DEFAULT_RH_METRIC = "weather-data__relative-humidity"
 
-EASTERN = pytz.timezone("US/Eastern")
+METRIC_LABELS = {
+    "weather-data__air-temperature": "Air Temperature",
+    "weather-data__avg-wind-speed": "Avg Wind Speed",
+    "weather-data__spot-wind-speed": "Spot Wind Speed",
+    "weather-data__relative-humidity": "Relative Humidity",
+    "weather-data__visibility-data": "Visibility",
+    "weather-data__atmospheric-pressure": "Atmospheric Pressure",
+    "weather-data__precipitation-rate": "Precipitation Rate",
+    "weather-data__precipitation-one-hour": "Precipitation (1h)",
+    "weather-data__precipitation-three-hour": "Precipitation (3h)",
+    "weather-data__precipitation-six-hour": "Precipitation (6h)",
+    "weather-data__precipitation-twelve-hour": "Precipitation (12h)",
+    "weather-data__precipitation-24-hour": "Precipitation (24h)",
+    "surface-data__surface-temperature": "Surface Temperature",
+    "surface-data__surface-friction-index": "Surface Friction Index",
+    "surface-data__surface-status": "Surface Status",
+    "subsurface-data__subsurface-temperature": "Subsurface Temperature",
+}
 
-st.set_page_config(page_title="SmarterRoads Real-Time Dashboard", layout="wide")
+UNIT_HINTS = {
+    "weather-data__air-temperature": "°C (raw)",
+    "weather-data__avg-wind-speed": "raw",
+    "weather-data__spot-wind-speed": "raw",
+    "weather-data__relative-humidity": "% (raw)",
+    "weather-data__visibility-data": "raw",
+    "weather-data__atmospheric-pressure": "raw",
+    "surface-data__surface-temperature": "°C (raw)",
+    "subsurface-data__subsurface-temperature": "°C (raw)",
+}
+
+st.set_page_config(page_title="SmarterRoads Real-Time Monitoring Dashboard", layout="wide")
 st_autorefresh(interval=AUTO_REFRESH_MS, key="auto_refresh")
 
 
@@ -314,7 +346,9 @@ def parse_events_xml(xml_bytes: bytes) -> pd.DataFrame:
 
     for c in ["update_time", "start_time", "clear_time"]:
         if c in df.columns:
-            df[c] = pd.to_datetime(df[c], errors="coerce", utc=True).dt.tz_convert("US/Eastern")
+            df[c] = pd.to_datetime(df[c], errors="coerce", utc=True)
+            if pd.api.types.is_datetime64tz_dtype(df[c]):
+                df[c] = df[c].dt.tz_convert("US/Eastern")
 
     df["lat"] = pd.to_numeric(df.get("lat"), errors="coerce")
     df["lon"] = pd.to_numeric(df.get("lon"), errors="coerce")
@@ -330,14 +364,6 @@ NS = {
     "ess": "http://www.openroadsconsulting.org/orci_ess",
     "qfree": "http://www.qfree.com/common",
 }
-
-
-def iter_by_local(elem: Optional[ET.Element], name: str) -> Iterable[ET.Element]:
-    if elem is None:
-        return []
-    for child in elem.iter():
-        if local_name(child.tag) == name:
-            yield child
 
 
 def to_iso(date_val: Optional[str], time_val: Optional[str], offset: Optional[str]) -> Optional[str]:
@@ -364,6 +390,14 @@ def to_float_degree(value: Optional[str]) -> Optional[float]:
     if abs(num) > 180:
         return num / 1e6
     return num
+
+
+def iter_by_local(elem: Optional[ET.Element], name: str):
+    if elem is None:
+        return
+    for child in elem.iter():
+        if local_name(child.tag) == name:
+            yield child
 
 
 def parse_weather_xml(xml_bytes: bytes) -> Tuple[pd.DataFrame, pd.DataFrame]:
@@ -445,20 +479,19 @@ def parse_weather_xml(xml_bytes: bytes) -> Tuple[pd.DataFrame, pd.DataFrame]:
 
     long_df["lat"] = pd.to_numeric(long_df["lat"], errors="coerce")
     long_df["lon"] = pd.to_numeric(long_df["lon"], errors="coerce")
-    long_df["obs_iso8601"] = pd.to_datetime(long_df["obs_iso8601"], errors="coerce", utc=True).dt.tz_convert("US/Eastern")
+    long_df["obs_iso8601"] = pd.to_datetime(long_df["obs_iso8601"], errors="coerce", utc=True)
+    if pd.api.types.is_datetime64tz_dtype(long_df["obs_iso8601"]):
+        long_df["obs_iso8601"] = long_df["obs_iso8601"].dt.tz_convert("US/Eastern")
     long_df["value"] = pd.to_numeric(long_df["value"], errors="coerce")
 
-    wide_df = (
-        long_df.pivot_table(index=index_cols, columns="metric_full", values="value", aggfunc="first")
-        .reset_index()
-    )
+    wide_df = long_df.pivot_table(index=index_cols, columns="metric_full", values="value", aggfunc="first").reset_index()
 
     for c in ["lat", "lon"]:
         if c in wide_df.columns:
             wide_df[c] = pd.to_numeric(wide_df[c], errors="coerce")
 
     if "obs_iso8601" in wide_df.columns:
-        wide_df["obs_iso8601"] = pd.to_datetime(wide_df["obs_iso8601"], errors="coerce")
+        wide_df["obs_iso8601"] = pd.to_datetime(wide_df["obs_iso8601"], errors="coerce", utc=True)
         if pd.api.types.is_datetime64tz_dtype(wide_df["obs_iso8601"]):
             wide_df["obs_iso8601"] = wide_df["obs_iso8601"].dt.tz_convert("US/Eastern")
 
@@ -478,7 +511,7 @@ def ingest_if_due() -> None:
         tok_events = get_token("ITERIS_TOKEN_EVENTFILTERED") or get_token("ITERIS_TOKEN_EVENTS")
         tok_weather = get_token("ITERIS_TOKEN_WEATHER")
         if not tok_events or not tok_weather:
-            raise RuntimeError("Missing tokens: set ITERIS_TOKEN_EVENTFILTERED (or ITERIS_TOKEN_EVENTS) and ITERIS_TOKEN_WEATHER")
+            raise RuntimeError("Missing tokens: set secrets ITERIS_TOKEN_EVENTFILTERED (or ITERIS_TOKEN_EVENTS) and ITERIS_TOKEN_WEATHER")
         ev_xml = fetch_xml(EVENTS_URL, tok_events)
         ev_df = parse_events_xml(ev_xml)
         ev_df.to_csv(EVENTS_CSV, index=False)
@@ -525,8 +558,9 @@ def parse_loaded_weather_wide(df: pd.DataFrame) -> pd.DataFrame:
         df["obs_iso8601"] = pd.to_datetime(df["obs_iso8601"], errors="coerce", utc=True)
         if pd.api.types.is_datetime64tz_dtype(df["obs_iso8601"]):
             df["obs_iso8601"] = df["obs_iso8601"].dt.tz_convert("US/Eastern")
+    reserved = {"org_id", "station_device_id", "station_device_name", "lat", "lon", "obs_iso8601"}
     for c in df.columns:
-        if c in {"org_id", "station_device_id", "station_device_name", "lat", "lon", "obs_iso8601"}:
+        if c in reserved:
             continue
         df[c] = pd.to_numeric(df[c], errors="coerce")
     return df
@@ -542,23 +576,18 @@ def numeric_metric_columns(wwide: pd.DataFrame) -> List[str]:
         s = pd.to_numeric(wwide[c], errors="coerce")
         if s.notna().any():
             keep.append(c)
+    keep = [m for m in keep if not m.startswith("alert__")]
     return sorted(keep)
 
 
 def choose_default_metric(metrics: List[str], preferred: str) -> str:
-    if preferred in metrics:
-        return preferred
-    return metrics[0] if metrics else preferred
+    return preferred if preferred in metrics else (metrics[0] if metrics else preferred)
 
 
-def scale_series_auto(s: pd.Series) -> Tuple[pd.Series, str]:
-    v = pd.to_numeric(s, errors="coerce")
-    med = float(v.dropna().median()) if v.notna().any() else 0.0
-    if med > 1_000_000:
-        return v / 1e6, "÷ 1e6"
-    if med > 10_000:
-        return v / 1e3, "÷ 1e3"
-    return v, "raw"
+def metric_label(m: str) -> str:
+    base = METRIC_LABELS.get(m, m)
+    u = UNIT_HINTS.get(m)
+    return f"{base} ({u})" if u else base
 
 
 def safe_plotly(fig, height: int, key: str, bottom_margin: int = 70) -> None:
@@ -566,31 +595,65 @@ def safe_plotly(fig, height: int, key: str, bottom_margin: int = 70) -> None:
     st.plotly_chart(fig, width="stretch", key=key)
 
 
-def latest_weather_snapshot(wwide: pd.DataFrame) -> pd.DataFrame:
-    if wwide is None or wwide.empty or "obs_iso8601" not in wwide.columns:
-        return pd.DataFrame()
-    t = wwide["obs_iso8601"].max()
-    if pd.isna(t):
-        return pd.DataFrame()
-    snap = wwide[wwide["obs_iso8601"] == t].copy()
-    snap["lat"] = pd.to_numeric(snap.get("lat"), errors="coerce")
-    snap["lon"] = pd.to_numeric(snap.get("lon"), errors="coerce")
-    return snap
-
-
-def weather_timeseries_for_station(wwide: pd.DataFrame, station_id: str, metric: str, hours: int) -> Tuple[pd.DataFrame, str]:
+def latest_weather_snapshot(wwide: pd.DataFrame, minutes: int = 30) -> pd.DataFrame:
     if wwide is None or wwide.empty:
-        return pd.DataFrame(), "raw"
+        return pd.DataFrame()
+    if "obs_iso8601" not in wwide.columns or "station_device_id" not in wwide.columns:
+        return pd.DataFrame()
+    cutoff = et_now() - timedelta(minutes=int(minutes))
+    sub = wwide.dropna(subset=["obs_iso8601"]).copy()
+    sub = sub[sub["obs_iso8601"] >= cutoff]
+    if sub.empty:
+        return pd.DataFrame()
+    sub = sub.sort_values("obs_iso8601", ascending=False)
+    sub = sub.drop_duplicates(subset=["station_device_id"], keep="first")
+    sub["lat"] = pd.to_numeric(sub.get("lat"), errors="coerce")
+    sub["lon"] = pd.to_numeric(sub.get("lon"), errors="coerce")
+    return sub
+
+
+def station_series(wwide: pd.DataFrame, station_id: str, metric: str, hours: int) -> pd.DataFrame:
+    if wwide is None or wwide.empty:
+        return pd.DataFrame()
     if "obs_iso8601" not in wwide.columns or "station_device_id" not in wwide.columns or metric not in wwide.columns:
-        return pd.DataFrame(), "raw"
+        return pd.DataFrame()
     cutoff = et_now() - timedelta(hours=int(hours))
     sub = wwide[wwide["station_device_id"].astype(str) == str(station_id)].copy()
     sub = sub.dropna(subset=["obs_iso8601"])
     sub = sub[sub["obs_iso8601"] >= cutoff]
-    scaled, scale_note = scale_series_auto(sub[metric])
-    sub["val"] = scaled
+    sub["val"] = pd.to_numeric(sub[metric], errors="coerce")
     sub = sub.dropna(subset=["val"]).sort_values("obs_iso8601")
-    return sub[["obs_iso8601", "val"]], scale_note
+    return sub[["obs_iso8601", "val"]]
+
+
+def network_trend(wwide: pd.DataFrame, metric: str, hours: int = 24, bucket: str = "30min") -> pd.DataFrame:
+    if wwide is None or wwide.empty or "obs_iso8601" not in wwide.columns or metric not in wwide.columns:
+        return pd.DataFrame()
+    cutoff = et_now() - timedelta(hours=int(hours))
+    sub = wwide.dropna(subset=["obs_iso8601"]).copy()
+    sub = sub[sub["obs_iso8601"] >= cutoff]
+    sub["val"] = pd.to_numeric(sub[metric], errors="coerce")
+    sub = sub.dropna(subset=["val"])
+    if sub.empty:
+        return pd.DataFrame()
+    sub["bucket"] = sub["obs_iso8601"].dt.floor(bucket)
+    out = sub.groupby("bucket")["val"].mean().reset_index().sort_values("bucket")
+    out["smooth"] = out["val"].rolling(3, min_periods=1).mean()
+    return out
+
+
+def events_trend(events_df: pd.DataFrame, hours: int = 24, bucket: str = "30min") -> pd.DataFrame:
+    if events_df is None or events_df.empty or "update_time" not in events_df.columns:
+        return pd.DataFrame()
+    cutoff = et_now() - timedelta(hours=int(hours))
+    tmp = events_df.dropna(subset=["update_time"]).copy()
+    tmp = tmp[tmp["update_time"] >= cutoff]
+    if tmp.empty:
+        return pd.DataFrame()
+    tmp["bucket"] = tmp["update_time"].dt.floor(bucket)
+    out = tmp.groupby("bucket").size().reset_index(name="count").sort_values("bucket")
+    out["smooth"] = out["count"].rolling(3, min_periods=1).mean()
+    return out
 
 
 try:
@@ -608,6 +671,7 @@ weather_metrics = numeric_metric_columns(wwide)
 default_metric = choose_default_metric(weather_metrics, DEFAULT_WEATHER_METRIC)
 default_vis = choose_default_metric(weather_metrics, DEFAULT_VIS_METRIC)
 default_wind = choose_default_metric(weather_metrics, DEFAULT_WIND_METRIC)
+default_rh = choose_default_metric(weather_metrics, DEFAULT_RH_METRIC)
 
 st.title("SmarterRoads Real-Time Monitoring Dashboard")
 
@@ -625,256 +689,270 @@ with h3:
 tab_overview, tab_weather, tab_events = st.tabs(["Overview", "Weather", "Events"])
 
 with tab_overview:
-    snap = latest_weather_snapshot(wwide)
+    snap = latest_weather_snapshot(wwide, minutes=30)
 
-    total_incidents = int(len(events_df)) if events_df is not None and not events_df.empty else 0
+    total_records = int(len(events_df)) if events_df is not None and not events_df.empty else 0
     active_incidents = (
         int(events_df["status"].fillna("").str.contains("active", case=False, na=False).sum())
         if events_df is not None and not events_df.empty and "status" in events_df.columns
-        else total_incidents
+        else 0
     )
-
     new_last_hour = 0
     if events_df is not None and not events_df.empty and "update_time" in events_df.columns:
         cutoff = et_now() - timedelta(hours=1)
         new_last_hour = int((events_df["update_time"] >= cutoff).sum())
 
-    avg_temp = None
+    avg_air = None
     avg_vis = None
-    temp_note = "raw"
-    vis_note = "raw"
-    if snap is not None and not snap.empty and weather_metrics:
+    if snap is not None and not snap.empty:
         if default_metric in snap.columns:
-            v, temp_note = scale_series_auto(snap[default_metric])
-            avg_temp = float(v.dropna().mean()) if v.notna().any() else None
+            v = pd.to_numeric(snap[default_metric], errors="coerce")
+            avg_air = float(v.dropna().mean()) if v.notna().any() else None
         if default_vis in snap.columns:
-            v, vis_note = scale_series_auto(snap[default_vis])
+            v = pd.to_numeric(snap[default_vis], errors="coerce")
             avg_vis = float(v.dropna().mean()) if v.notna().any() else None
 
+    stations_reporting_air = 0
+    if snap is not None and not snap.empty and default_metric in snap.columns:
+        stations_reporting_air = int(pd.to_numeric(snap[default_metric], errors="coerce").notna().sum())
+
     k1, k2, k3, k4, k5 = st.columns(5)
-    k1.metric("Total incidents", f"{total_incidents:,}")
+    k1.metric("Total records loaded", f"{total_records:,}")
     k2.metric("Active incidents", f"{active_incidents:,}")
-    k3.metric("New (last 1h)", f"{new_last_hour:,}")
-    k4.metric(f"Avg air temp ({temp_note})", "—" if avg_temp is None else f"{avg_temp:.2f}")
-    k5.metric(f"Avg visibility ({vis_note})", "—" if avg_vis is None else f"{avg_vis:.2f}")
+    k3.metric("New incidents (last 1h)", f"{new_last_hour:,}")
+    k4.metric(metric_label(default_metric), "—" if avg_air is None else f"{avg_air:,.2f}")
+    k5.metric(metric_label(default_vis), "—" if avg_vis is None else f"{avg_vis:,.2f}")
+
+    st.caption(f"Stations reporting {METRIC_LABELS.get(default_metric, default_metric)} in last 30 min: {stations_reporting_air:,}")
 
     st.divider()
 
     c1, c2 = st.columns(2)
     with c1:
-        st.subheader("Incidents trend (last 24h)")
-        if events_df is not None and not events_df.empty and "update_time" in events_df.columns:
-            tmp = events_df.dropna(subset=["update_time"]).copy()
-            cutoff = et_now() - timedelta(hours=24)
-            tmp = tmp[tmp["update_time"] >= cutoff]
-            tmp["bucket"] = tmp["update_time"].dt.floor("10min")
-            trend = tmp.groupby("bucket").size().reset_index(name="count").sort_values("bucket")
-            fig = px.line(trend, x="bucket", y="count", markers=True, title="Incidents per 10 minutes (ET)")
-            safe_plotly(fig, 360, key="ov_inc_trend", bottom_margin=10)
+        st.subheader("Incidents Trend (last 24h)")
+        tr = events_trend(events_df, hours=24, bucket="30min")
+        if not tr.empty:
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(x=tr["bucket"], y=tr["count"], mode="lines", name="Count"))
+            fig.add_trace(go.Scatter(x=tr["bucket"], y=tr["smooth"], mode="lines", name="Smoothed"))
+            fig.update_layout(title="Incidents per 30 min (ET)", xaxis_title="Time (ET)", yaxis_title="Count")
+            safe_plotly(fig, 360, key="ov_inc_trend_v2", bottom_margin=10)
         else:
-            st.info("No events available yet.")
+            st.info("No events available yet for the last 24h window.")
 
     with c2:
-        st.subheader("Weather trend (selected station)")
-        if wwide is not None and not wwide.empty and weather_metrics:
-            stations = sorted(wwide["station_device_id"].dropna().astype(str).unique().tolist())
-            stn = st.selectbox("Station", stations, index=0, key="ov_station")
-            met = st.selectbox(
-                "Metric",
-                weather_metrics,
-                index=weather_metrics.index(default_metric) if default_metric in weather_metrics else 0,
-                key="ov_metric",
-            )
-            hours = st.slider("Time window (hours)", 1, 48, 12, key="ov_hours")
-            ts, scale_note = weather_timeseries_for_station(wwide, stn, met, hours)
-            if not ts.empty:
-                fig = px.line(ts, x="obs_iso8601", y="val", markers=True, title=f"{met} @ {stn} ({scale_note})")
-                safe_plotly(fig, 360, key="ov_wx_trend", bottom_margin=10)
+        st.subheader("Weather Trend (network average)")
+        met_choices = weather_metrics if weather_metrics else []
+        if met_choices:
+            with st.expander("Controls", expanded=True):
+                met = st.selectbox(
+                    "Metric",
+                    met_choices,
+                    index=met_choices.index(default_metric) if default_metric in met_choices else 0,
+                    format_func=metric_label,
+                    key="ov_net_metric",
+                )
+                hours = st.slider("Time window (hours)", 6, 72, 24, key="ov_net_hours")
+            nt = network_trend(wwide, met, hours=hours, bucket="30min")
+            if not nt.empty:
+                fig = go.Figure()
+                fig.add_trace(go.Scatter(x=nt["bucket"], y=nt["val"], mode="lines", name="Avg"))
+                fig.add_trace(go.Scatter(x=nt["bucket"], y=nt["smooth"], mode="lines", name="Smoothed"))
+                fig.update_layout(title=f"{metric_label(met)} (network avg)", xaxis_title="Time (ET)", yaxis_title="Value")
+                safe_plotly(fig, 360, key="ov_weather_net_v2", bottom_margin=10)
             else:
-                st.info("No usable numeric data for this station/metric in the selected window.")
+                st.info("No weather data available yet for this metric/window.")
         else:
-            st.info("No weather data available yet.")
+            st.info("No weather metrics available yet.")
 
     st.divider()
 
     b1, b2 = st.columns(2)
     with b1:
-        st.subheader("Incidents by type (Top 12)")
+        st.subheader("Incidents by Type (Top 12)")
         if events_df is not None and not events_df.empty and "event_type" in events_df.columns:
             top = events_df["event_type"].fillna("Unknown").value_counts().head(12).reset_index()
             top.columns = ["event_type", "count"]
             fig = px.bar(top, x="event_type", y="count", title="Top incident types")
-            safe_plotly(fig, 360, key="ov_types", bottom_margin=120)
+            safe_plotly(fig, 360, key="ov_types_v2", bottom_margin=120)
         else:
-            st.info("No incident types available yet.")
+            st.info("No incident type data available yet.")
+
     with b2:
-        st.subheader("Incidents by district (Top 12)")
+        st.subheader("Incidents by District (Top 12)")
         if events_df is not None and not events_df.empty and "district" in events_df.columns:
             top = events_df["district"].fillna("Unknown").value_counts().head(12).reset_index()
             top.columns = ["district", "count"]
             fig = px.bar(top, x="district", y="count", title="Top districts")
-            safe_plotly(fig, 360, key="ov_districts", bottom_margin=120)
+            safe_plotly(fig, 360, key="ov_districts_v2", bottom_margin=120)
         else:
             st.info("No district data available yet.")
 
 with tab_weather:
-    st.subheader("Weather monitoring")
+    st.subheader("Weather Monitoring")
+
     if wwide is None or wwide.empty or not weather_metrics:
         st.info("Weather data not available yet.")
     else:
-        snap = latest_weather_snapshot(wwide)
         stations = sorted(wwide["station_device_id"].dropna().astype(str).unique().tolist())
-
-        st.sidebar.header("Weather controls")
-        met = st.sidebar.selectbox(
-            "Weather metric",
-            weather_metrics,
-            index=weather_metrics.index(default_metric) if default_metric in weather_metrics else 0,
-            key="w_metric",
-        )
-        stn = st.sidebar.selectbox("Station", stations, index=0, key="w_station")
-        hours = st.sidebar.slider("Trend window (hours)", 1, 48, 12, key="w_hours")
-
-        top_row = st.columns(4)
-        if snap is not None and not snap.empty and met in snap.columns:
-            snap2 = snap.dropna(subset=["lat", "lon"]).copy()
-            snap2["val"], scale_note = scale_series_auto(snap2[met])
-            snap2 = snap2.dropna(subset=["val"])
-            station_val = None
-            sv = snap2[snap2["station_device_id"].astype(str) == str(stn)]["val"]
-            if not sv.dropna().empty:
-                station_val = float(sv.dropna().iloc[0])
-
-            top_row[0].metric("Selected metric", met)
-            top_row[1].metric(f"Latest @ station ({scale_note})", "—" if station_val is None else f"{station_val:.3f}")
-            top_row[2].metric(
-                f"Avg (latest snapshot) ({scale_note})",
-                "—" if snap2["val"].dropna().empty else f"{float(snap2['val'].dropna().mean()):.3f}",
+        with st.expander("Controls", expanded=True):
+            met = st.selectbox(
+                "Metric",
+                weather_metrics,
+                index=weather_metrics.index(default_metric) if default_metric in weather_metrics else 0,
+                format_func=metric_label,
+                key="w_metric_v2",
             )
-            top_row[3].metric("Stations reporting", f"{int(snap2['val'].notna().sum()):,}")
-        else:
-            st.warning("Latest snapshot not available yet for this metric.")
+            stn = st.selectbox("Station", stations, index=0, key="w_station_v2")
+            hours = st.slider("Trend window (hours)", 6, 72, 24, key="w_hours_v2")
+            snap_minutes = st.slider("Current snapshot window (minutes)", 10, 60, 30, key="w_snap_mins_v2")
 
-        c1, c2 = st.columns([1.35, 1.65])
+        snap = latest_weather_snapshot(wwide, minutes=int(snap_minutes))
+
+        top = st.columns(4)
+
+        latest_station_val = None
+        if snap is not None and not snap.empty and met in snap.columns:
+            ssub = snap[snap["station_device_id"].astype(str) == str(stn)].copy()
+            if not ssub.empty:
+                v = pd.to_numeric(ssub[met], errors="coerce").dropna()
+                if not v.empty:
+                    latest_station_val = float(v.iloc[0])
+
+        map_df = pd.DataFrame()
+        if snap is not None and not snap.empty and met in snap.columns:
+            map_df = snap.dropna(subset=["lat", "lon"]).copy()
+            map_df["val"] = pd.to_numeric(map_df[met], errors="coerce")
+            map_df = map_df.dropna(subset=["val"])
+            map_df = map_df[(map_df["lat"].between(-90, 90)) & (map_df["lon"].between(-180, 180))]
+
+        stations_reporting = int(map_df["val"].notna().sum()) if not map_df.empty else 0
+        avg_snapshot = float(map_df["val"].mean()) if not map_df.empty else None
+
+        top[0].metric("Selected metric", metric_label(met))
+        top[1].metric("Latest @ station", "—" if latest_station_val is None else f"{latest_station_val:,.2f}")
+        top[2].metric("Avg (current snapshot)", "—" if avg_snapshot is None else f"{avg_snapshot:,.2f}")
+        top[3].metric("Stations reporting", f"{stations_reporting:,}")
+
+        c1, c2 = st.columns([1.2, 1.8])
         with c1:
-            st.subheader("Trend (station)")
-            ts, scale_note = weather_timeseries_for_station(wwide, stn, met, hours)
+            st.subheader("Trend (selected station)")
+            ts = station_series(wwide, stn, met, hours)
             if not ts.empty:
-                fig = px.line(ts, x="obs_iso8601", y="val", markers=True, title=f"{met} @ {stn} ({scale_note})")
-                safe_plotly(fig, 420, key="w_station_trend", bottom_margin=10)
+                fig = go.Figure()
+                fig.add_trace(go.Scatter(x=ts["obs_iso8601"], y=ts["val"], mode="lines", name="Value"))
+                smooth = ts["val"].rolling(5, min_periods=1).mean()
+                fig.add_trace(go.Scatter(x=ts["obs_iso8601"], y=smooth, mode="lines", name="Smoothed"))
+                fig.update_layout(title=f"{metric_label(met)} @ {stn}", xaxis_title="Time (ET)", yaxis_title="Value")
+                safe_plotly(fig, 420, key="w_station_trend_v2", bottom_margin=10)
             else:
                 st.info("No usable numeric data for this station/metric in the selected window.")
 
+            st.subheader("Trend (network average)")
+            nt = network_trend(wwide, met, hours=hours, bucket="30min")
+            if not nt.empty:
+                fig = go.Figure()
+                fig.add_trace(go.Scatter(x=nt["bucket"], y=nt["val"], mode="lines", name="Avg"))
+                fig.add_trace(go.Scatter(x=nt["bucket"], y=nt["smooth"], mode="lines", name="Smoothed"))
+                fig.update_layout(title=f"{metric_label(met)} (network avg)", xaxis_title="Time (ET)", yaxis_title="Value")
+                safe_plotly(fig, 420, key="w_network_trend_v2", bottom_margin=10)
+            else:
+                st.info("No network trend available for this metric/window.")
+
         with c2:
-            st.subheader("Map (latest snapshot)")
-            if snap is not None and not snap.empty and met in snap.columns:
-                map_df = snap.dropna(subset=["lat", "lon"]).copy()
-                map_df["val"], _ = scale_series_auto(map_df[met])
-                map_df = map_df.dropna(subset=["val"])
-                map_df = map_df[(map_df["lat"].between(-90, 90)) & (map_df["lon"].between(-180, 180))]
-                if not map_df.empty:
-                    fig = px.scatter_mapbox(
-                        map_df,
-                        lat="lat",
-                        lon="lon",
-                        color="val",
-                        hover_name="station_device_name" if "station_device_name" in map_df.columns else "station_device_id",
-                        hover_data={"station_device_id": True, "val": True, "lat": False, "lon": False},
-                        zoom=6,
-                        height=420,
-                    )
-                    fig.update_layout(mapbox_style="open-street-map", margin=dict(l=10, r=10, t=10, b=10))
-                    st.plotly_chart(fig, width="stretch", key="w_map")
-                else:
-                    st.info("No mappable values for this metric at the latest snapshot.")
+            st.subheader("Map (current snapshot)")
+            if not map_df.empty:
+                fig = px.scatter_mapbox(
+                    map_df,
+                    lat="lat",
+                    lon="lon",
+                    color="val",
+                    hover_name="station_device_name" if "station_device_name" in map_df.columns else "station_device_id",
+                    hover_data={"station_device_id": True, "val": True},
+                    zoom=6,
+                    height=520,
+                )
+                fig.update_layout(mapbox_style="open-street-map", margin=dict(l=10, r=10, t=10, b=10))
+                st.plotly_chart(fig, width="stretch", key="w_map_v2")
             else:
-                st.info("No map data available yet.")
+                st.info("No mappable values for this metric in the current snapshot window.")
 
-        st.divider()
-
-        d1, d2 = st.columns(2)
-        with d1:
-            st.subheader("Top stations (latest)")
-            if snap is not None and not snap.empty and met in snap.columns:
-                df = snap.copy()
-                df["val"], _ = scale_series_auto(df[met])
-                df = df.dropna(subset=["val"])
-                if not df.empty:
-                    df = df.sort_values("val", ascending=False).head(10)
-                    df["label"] = df["station_device_name"].fillna(df["station_device_id"])
-                    fig = px.bar(df, x="label", y="val", title=f"Top 10 stations by {met}")
-                    safe_plotly(fig, 380, key="w_top_stations", bottom_margin=130)
-                else:
-                    st.info("No values available to rank.")
+            st.subheader("Distribution (current snapshot)")
+            if not map_df.empty:
+                fig = px.histogram(map_df, x="val", nbins=30, title=f"{metric_label(met)} distribution")
+                safe_plotly(fig, 420, key="w_hist_v2", bottom_margin=70)
             else:
-                st.info("No snapshot values available.")
-
-        with d2:
-            st.subheader("Distribution (latest)")
-            if snap is not None and not snap.empty and met in snap.columns:
-                df = snap.copy()
-                df["val"], scale_note = scale_series_auto(df[met])
-                df = df.dropna(subset=["val"])
-                if not df.empty:
-                    fig = px.histogram(df, x="val", nbins=30, title=f"{met} distribution ({scale_note})")
-                    safe_plotly(fig, 380, key="w_hist", bottom_margin=70)
-                else:
-                    st.info("No values available for distribution.")
-            else:
-                st.info("No snapshot values available.")
+                st.info("No values available for distribution.")
 
 with tab_events:
-    st.subheader("Events monitoring")
+    st.subheader("Events Monitoring")
+
     if events_df is None or events_df.empty:
         st.info("Events data not available yet.")
     else:
-        ev = events_df.copy()
-        ev["lat"] = pd.to_numeric(ev.get("lat"), errors="coerce")
-        ev["lon"] = pd.to_numeric(ev.get("lon"), errors="coerce")
-        ev = ev.dropna(subset=["lat", "lon"])
-        ev = ev[(ev["lat"].between(-90, 90)) & (ev["lon"].between(-180, 180))]
+        with st.expander("Controls", expanded=True):
+            hours = st.slider("Time window (hours)", 6, 72, 24, key="e_hours_v2")
+            bucket = st.selectbox("Trend bucket", ["10min", "15min", "30min", "60min"], index=2, key="e_bucket_v2")
+
+        tr = events_trend(events_df, hours=hours, bucket=bucket)
+
+        ev_map = events_df.copy()
+        ev_map["lat"] = pd.to_numeric(ev_map.get("lat"), errors="coerce")
+        ev_map["lon"] = pd.to_numeric(ev_map.get("lon"), errors="coerce")
+        if "update_time" in ev_map.columns:
+            cutoff = et_now() - timedelta(hours=int(hours))
+            ev_map = ev_map.dropna(subset=["update_time"])
+            ev_map = ev_map[ev_map["update_time"] >= cutoff]
+        ev_map = ev_map.dropna(subset=["lat", "lon"])
+        ev_map = ev_map[(ev_map["lat"].between(-90, 90)) & (ev_map["lon"].between(-180, 180))]
+
+        k1, k2, k3, k4 = st.columns(4)
+        k1.metric("Records in window", f"{int(len(events_df)):,}")
+        k2.metric("Mappable events", f"{int(len(ev_map)):,}")
+        missing_geo = int(len(events_df) - len(ev_map))
+        k3.metric("Missing location", f"{missing_geo:,}")
+        k4.metric("Bucket", bucket)
 
         left, right = st.columns([1.2, 1.8])
-        with left:
-            st.subheader("Trend (last 24h)")
-            if "update_time" in events_df.columns:
-                tmp = events_df.dropna(subset=["update_time"]).copy()
-                cutoff = et_now() - timedelta(hours=24)
-                tmp = tmp[tmp["update_time"] >= cutoff]
-                tmp["bucket"] = tmp["update_time"].dt.floor("15min")
-                trend = tmp.groupby("bucket").size().reset_index(name="count").sort_values("bucket")
-                fig = px.line(trend, x="bucket", y="count", markers=True, title="Incidents per 15 minutes (ET)")
-                safe_plotly(fig, 360, key="e_trend", bottom_margin=10)
-            else:
-                st.info("No timestamps available.")
 
-            st.subheader("Top types")
+        with left:
+            st.subheader("Incidents Trend")
+            if not tr.empty:
+                fig = go.Figure()
+                fig.add_trace(go.Scatter(x=tr["bucket"], y=tr["count"], mode="lines", name="Count"))
+                fig.add_trace(go.Scatter(x=tr["bucket"], y=tr["smooth"], mode="lines", name="Smoothed"))
+                fig.update_layout(title=f"Incidents per {bucket} (ET)", xaxis_title="Time (ET)", yaxis_title="Count")
+                safe_plotly(fig, 380, key="e_trend_v2", bottom_margin=10)
+            else:
+                st.info("No events available for this window.")
+
+            st.subheader("Top Types")
             if "event_type" in events_df.columns:
                 top = events_df["event_type"].fillna("Unknown").value_counts().head(12).reset_index()
                 top.columns = ["event_type", "count"]
                 fig = px.bar(top, x="event_type", y="count", title="Top incident types")
-                safe_plotly(fig, 360, key="e_types", bottom_margin=120)
+                safe_plotly(fig, 380, key="e_types_v2", bottom_margin=120)
             else:
                 st.info("No event_type available.")
 
         with right:
-            st.subheader("Map (events)")
-            if not ev.empty:
+            st.subheader("Events Map")
+            if not ev_map.empty:
                 hover_cols = []
-                for c in ["incident_id", "event_type", "status", "district", "route", "location_name"]:
-                    if c in ev.columns:
+                for c in ["incident_id", "event_type", "status", "district", "route", "location_name", "update_time"]:
+                    if c in ev_map.columns:
                         hover_cols.append(c)
                 fig = px.scatter_mapbox(
-                    ev,
+                    ev_map,
                     lat="lat",
                     lon="lon",
-                    color="event_type" if "event_type" in ev.columns else None,
+                    color="event_type" if "event_type" in ev_map.columns else None,
                     hover_data=hover_cols,
                     zoom=6,
-                    height=760,
+                    height=780,
                 )
                 fig.update_layout(mapbox_style="open-street-map", margin=dict(l=10, r=10, t=10, b=10))
-                st.plotly_chart(fig, width="stretch", key="e_map")
+                st.plotly_chart(fig, width="stretch", key="e_map_v2")
             else:
-                st.info("No events with valid coordinates to plot.")
+                st.info("No events with valid coordinates in this window.")
 
